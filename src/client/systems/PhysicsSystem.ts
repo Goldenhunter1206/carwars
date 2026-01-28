@@ -5,18 +5,16 @@ import {
   StandardMaterial,
   Color3,
   Mesh,
-  PhysicsAggregate,
-  PhysicsShapeType,
+  Quaternion,
 } from '@babylonjs/core';
-import { HavokPlugin } from '@babylonjs/core/Physics/v2/Plugins/havokPlugin';
-import HavokPhysics from '@babylonjs/havok';
+import * as CANNON from 'cannon-es';
 import { GAME_CONFIG, BALL_CONFIG } from '../../shared/constants';
 import { Arena } from '../entities/Arena';
 import { BoostPadManager } from '../entities/BoostPad';
 
 export class PhysicsSystem {
   private scene: Scene;
-  private havokPlugin: HavokPlugin | null = null;
+  private world: CANNON.World | null = null;
 
   // Arena and boost pads
   private arena: Arena | null = null;
@@ -24,30 +22,45 @@ export class PhysicsSystem {
 
   // Physics bodies
   private ballMesh: Mesh | null = null;
-  private ballAggregate: PhysicsAggregate | null = null;
+  private ballBody: CANNON.Body | null = null;
+  private groundBody: CANNON.Body | null = null;
+
+  // Track all physics bodies for updates
+  private physicsBodies: Array<{ mesh: Mesh; body: CANNON.Body }> = [];
 
   constructor(scene: Scene) {
     this.scene = scene;
   }
 
   async initialize(): Promise<void> {
-    // Initialize Havok physics
-    const havokInstance = await HavokPhysics();
-    this.havokPlugin = new HavokPlugin(true, havokInstance);
+    // Initialize Cannon.js physics world
+    this.world = new CANNON.World();
+    this.world.gravity.set(0, GAME_CONFIG.GRAVITY, 0);
 
-    // Enable physics in the scene
-    this.scene.enablePhysics(
-      new Vector3(0, GAME_CONFIG.GRAVITY, 0),
-      this.havokPlugin
-    );
+    // Improve solver for better stability
+    this.world.broadphase = new CANNON.SAPBroadphase(this.world);
 
-    console.log('Havok physics initialized');
+    // Default contact material
+    this.world.defaultContactMaterial.friction = 0.3;
+    this.world.defaultContactMaterial.restitution = 0.5;
+
+    console.log('Cannon-ES physics initialized');
   }
 
   createArenaFloor(): void {
-    // Create the arena with curved corners, goals, and field markings
+    // Create the visual arena (meshes only, no physics)
     this.arena = new Arena(this.scene);
     this.arena.create();
+
+    // Add physics ground plane
+    const groundShape = new CANNON.Plane();
+    this.groundBody = new CANNON.Body({ mass: 0 });
+    this.groundBody.addShape(groundShape);
+    this.groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+    this.world!.addBody(this.groundBody);
+
+    // Create physics colliders for arena walls
+    this.createArenaPhysics();
 
     // Create boost pad system
     this.boostPadManager = new BoostPadManager(this.scene);
@@ -62,6 +75,163 @@ export class PhysicsSystem {
     console.log('Arena created with curved corners, goals, and boost pads');
   }
 
+  private createArenaPhysics(): void {
+    const { LENGTH, WIDTH, WALL_HEIGHT, CORNER_RADIUS, GOAL_WIDTH } = GAME_CONFIG.ARENA;
+    const wallThickness = 1;
+
+    // Calculate dimensions accounting for corners
+    const straightLengthZ = LENGTH - 2 * CORNER_RADIUS;
+
+    // Side walls (along Z axis)
+    [-1, 1].forEach((side) => {
+      this.addStaticBox(
+        wallThickness / 2,
+        WALL_HEIGHT / 2,
+        straightLengthZ / 2,
+        new Vector3((side * (WIDTH + wallThickness)) / 2, WALL_HEIGHT / 2, 0)
+      );
+    });
+
+    // Back walls (with goal openings)
+    const straightLengthX = WIDTH - 2 * CORNER_RADIUS;
+    const sideWidth = (straightLengthX - GOAL_WIDTH) / 2;
+
+    [-1, 1].forEach((side) => {
+      // Left section
+      this.addStaticBox(
+        sideWidth / 2,
+        WALL_HEIGHT / 2,
+        wallThickness / 2,
+        new Vector3(
+          -(GOAL_WIDTH / 2 + sideWidth / 2),
+          WALL_HEIGHT / 2,
+          (side * (LENGTH + wallThickness)) / 2
+        )
+      );
+
+      // Right section
+      this.addStaticBox(
+        sideWidth / 2,
+        WALL_HEIGHT / 2,
+        wallThickness / 2,
+        new Vector3(
+          GOAL_WIDTH / 2 + sideWidth / 2,
+          WALL_HEIGHT / 2,
+          (side * (LENGTH + wallThickness)) / 2
+        )
+      );
+    });
+
+    // Curved corner physics (approximated with boxes)
+    this.createCornerPhysics(CORNER_RADIUS, WALL_HEIGHT, wallThickness);
+
+    // Goal physics colliders
+    this.createGoalPhysics();
+  }
+
+  private createCornerPhysics(radius: number, height: number, thickness: number): void {
+    const { LENGTH, WIDTH } = GAME_CONFIG.ARENA;
+    const segments = 8;
+
+    const cornerPositions = [
+      { x: WIDTH / 2 - radius, z: LENGTH / 2 - radius, startAngle: 0 },
+      { x: -WIDTH / 2 + radius, z: LENGTH / 2 - radius, startAngle: Math.PI / 2 },
+      { x: -WIDTH / 2 + radius, z: -LENGTH / 2 + radius, startAngle: Math.PI },
+      { x: WIDTH / 2 - radius, z: -LENGTH / 2 + radius, startAngle: (3 * Math.PI) / 2 },
+    ];
+
+    cornerPositions.forEach((corner) => {
+      for (let i = 0; i < segments; i++) {
+        const angle1 = corner.startAngle + (i * Math.PI) / (2 * segments);
+        const angle2 = corner.startAngle + ((i + 1) * Math.PI) / (2 * segments);
+        const midAngle = (angle1 + angle2) / 2;
+        const segmentLength = (2 * radius * Math.sin(Math.PI / (4 * segments))) * 1.05;
+
+        const posX = corner.x + (radius + thickness / 2) * Math.cos(midAngle);
+        const posZ = corner.z + (radius + thickness / 2) * Math.sin(midAngle);
+
+        // Create rotated box for corner segment
+        const shape = new CANNON.Box(new CANNON.Vec3(segmentLength / 2, height / 2, thickness / 2));
+        const body = new CANNON.Body({ mass: 0 });
+        body.addShape(shape);
+        body.position.set(posX, height / 2, posZ);
+        body.quaternion.setFromEuler(0, -midAngle + Math.PI / 2, 0);
+        this.world!.addBody(body);
+      }
+    });
+  }
+
+  private createGoalPhysics(): void {
+    const { LENGTH, GOAL_WIDTH, GOAL_HEIGHT, GOAL_DEPTH } = GAME_CONFIG.ARENA;
+
+    // Goal colliders for both ends
+    [-1, 1].forEach((side) => {
+      const goalZ = (side * LENGTH) / 2;
+      const direction = side;
+
+      // Goal posts (vertical cylinders approximated as boxes)
+      [-1, 1].forEach((postSide) => {
+        this.addStaticBox(
+          0.15,
+          GOAL_HEIGHT / 2,
+          0.15,
+          new Vector3(
+            (postSide * GOAL_WIDTH) / 2,
+            GOAL_HEIGHT / 2,
+            goalZ + direction * 0.15
+          )
+        );
+      });
+
+      // Crossbar
+      this.addStaticBox(
+        GOAL_WIDTH / 2,
+        0.15,
+        0.15,
+        new Vector3(0, GOAL_HEIGHT, goalZ + direction * 0.15)
+      );
+
+      // Goal back wall
+      this.addStaticBox(
+        GOAL_WIDTH / 2,
+        GOAL_HEIGHT / 2,
+        0.1,
+        new Vector3(0, GOAL_HEIGHT / 2, goalZ + direction * (GOAL_DEPTH + 0.1))
+      );
+
+      // Goal side walls
+      [-1, 1].forEach((wallSide) => {
+        this.addStaticBox(
+          0.1,
+          GOAL_HEIGHT / 2,
+          GOAL_DEPTH / 2,
+          new Vector3(
+            (wallSide * GOAL_WIDTH) / 2,
+            GOAL_HEIGHT / 2,
+            goalZ + direction * (GOAL_DEPTH / 2 + 0.1)
+          )
+        );
+      });
+
+      // Goal roof
+      this.addStaticBox(
+        GOAL_WIDTH / 2,
+        0.1,
+        GOAL_DEPTH / 2,
+        new Vector3(0, GOAL_HEIGHT, goalZ + direction * (GOAL_DEPTH / 2 + 0.1))
+      );
+    });
+  }
+
+  private addStaticBox(halfX: number, halfY: number, halfZ: number, position: Vector3): CANNON.Body {
+    const shape = new CANNON.Box(new CANNON.Vec3(halfX, halfY, halfZ));
+    const body = new CANNON.Body({ mass: 0 });
+    body.addShape(shape);
+    body.position.set(position.x, position.y, position.z);
+    this.world!.addBody(body);
+    return body;
+  }
+
   private createBall(): void {
     // Create ball mesh
     this.ballMesh = MeshBuilder.CreateSphere(
@@ -72,7 +242,7 @@ export class PhysicsSystem {
       },
       this.scene
     );
-    this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 0.5, 0);
+    this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 2, 0);
 
     // Ball material (soccer ball look)
     const ballMaterial = new StandardMaterial('ballMaterial', this.scene);
@@ -82,21 +252,29 @@ export class PhysicsSystem {
     this.ballMesh.material = ballMaterial;
 
     // Add physics to ball
-    this.ballAggregate = new PhysicsAggregate(
-      this.ballMesh,
-      PhysicsShapeType.SPHERE,
+    const ballShape = new CANNON.Sphere(BALL_CONFIG.RADIUS);
+    this.ballBody = new CANNON.Body({
+      mass: BALL_CONFIG.MASS,
+      shape: ballShape,
+      position: new CANNON.Vec3(0, BALL_CONFIG.RADIUS + 2, 0),
+      linearDamping: BALL_CONFIG.LINEAR_DAMPING,
+      angularDamping: BALL_CONFIG.ANGULAR_DAMPING,
+    });
+
+    // Set material properties
+    this.ballBody.material = new CANNON.Material('ball');
+    const ballGroundContact = new CANNON.ContactMaterial(
+      this.ballBody.material,
+      new CANNON.Material('ground'),
       {
-        mass: BALL_CONFIG.MASS,
         friction: BALL_CONFIG.FRICTION,
         restitution: BALL_CONFIG.RESTITUTION,
-      },
-      this.scene
+      }
     );
+    this.world!.addContactMaterial(ballGroundContact);
+    this.world!.addBody(this.ballBody);
 
-    // Apply some damping
-    const body = this.ballAggregate.body;
-    body.setLinearDamping(BALL_CONFIG.LINEAR_DAMPING);
-    body.setAngularDamping(BALL_CONFIG.ANGULAR_DAMPING);
+    this.physicsBodies.push({ mesh: this.ballMesh, body: this.ballBody });
   }
 
   private createTestCar(): void {
@@ -110,7 +288,7 @@ export class PhysicsSystem {
       },
       this.scene
     );
-    car.position = new Vector3(0, 0.5, 20);
+    car.position = new Vector3(0, 1, 20);
 
     const carMaterial = new StandardMaterial('carMaterial', this.scene);
     carMaterial.diffuseColor = new Color3(0.2, 0.5, 1); // Blue team car
@@ -118,16 +296,16 @@ export class PhysicsSystem {
     car.material = carMaterial;
 
     // Add physics to car
-    new PhysicsAggregate(
-      car,
-      PhysicsShapeType.BOX,
-      {
-        mass: 150,
-        friction: 0.5,
-        restitution: 0.2,
-      },
-      this.scene
-    );
+    const carShape = new CANNON.Box(new CANNON.Vec3(0.65, 0.25, 1.15));
+    const carBody = new CANNON.Body({
+      mass: 150,
+      shape: carShape,
+      position: new CANNON.Vec3(0, 1, 20),
+      linearDamping: 0.3,
+      angularDamping: 0.5,
+    });
+    this.world!.addBody(carBody);
+    this.physicsBodies.push({ mesh: car, body: carBody });
 
     // Store reference for camera
     this.scene.metadata = this.scene.metadata || {};
@@ -135,8 +313,21 @@ export class PhysicsSystem {
   }
 
   update(deltaTime: number): void {
-    // Physics is automatically stepped by Babylon's physics plugin
-    // Additional game physics logic can go here
+    if (!this.world) return;
+
+    // Step the physics simulation
+    this.world.step(1 / 60, deltaTime, 3);
+
+    // Sync mesh positions with physics bodies
+    for (const { mesh, body } of this.physicsBodies) {
+      mesh.position.set(body.position.x, body.position.y, body.position.z);
+      mesh.rotationQuaternion = new Quaternion(
+        body.quaternion.x,
+        body.quaternion.y,
+        body.quaternion.z,
+        body.quaternion.w
+      );
+    }
 
     // Update boost pads (respawn timers)
     if (this.boostPadManager) {
@@ -144,25 +335,25 @@ export class PhysicsSystem {
     }
 
     // Clamp ball speed
-    if (this.ballAggregate) {
-      const velocity = this.ballAggregate.body.getLinearVelocity();
+    if (this.ballBody) {
+      const velocity = this.ballBody.velocity;
       const speed = velocity.length();
 
       if (speed > BALL_CONFIG.MAX_SPEED) {
-        const clampedVelocity = velocity.normalize().scale(BALL_CONFIG.MAX_SPEED);
-        this.ballAggregate.body.setLinearVelocity(clampedVelocity);
+        velocity.scale(BALL_CONFIG.MAX_SPEED / speed, velocity);
       }
     }
   }
 
   resetBall(): void {
-    if (this.ballMesh && this.ballAggregate) {
+    if (this.ballMesh && this.ballBody) {
       // Reset position
-      this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 0.5, 0);
+      this.ballBody.position.set(0, BALL_CONFIG.RADIUS + 2, 0);
+      this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 2, 0);
 
       // Reset velocities
-      this.ballAggregate.body.setLinearVelocity(Vector3.Zero());
-      this.ballAggregate.body.setAngularVelocity(Vector3.Zero());
+      this.ballBody.velocity.set(0, 0, 0);
+      this.ballBody.angularVelocity.set(0, 0, 0);
     }
   }
 
@@ -214,5 +405,9 @@ export class PhysicsSystem {
     }
 
     return null;
+  }
+
+  getWorld(): CANNON.World | null {
+    return this.world;
   }
 }

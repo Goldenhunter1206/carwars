@@ -5,8 +5,6 @@ import {
   StandardMaterial,
   Color3,
   Mesh,
-  PhysicsAggregate,
-  PhysicsShapeType,
   Texture,
   DynamicTexture,
 } from '@babylonjs/core';
@@ -127,7 +125,7 @@ export class Arena {
   private createFloor(): void {
     const { LENGTH, WIDTH } = GAME_CONFIG.ARENA;
 
-    // Create the main floor
+    // Create the main floor (physics handled by PhysicsSystem with Cannon-ES)
     this.floor = MeshBuilder.CreateGround(
       'arenaFloor',
       {
@@ -140,18 +138,6 @@ export class Arena {
 
     this.floor.material = this.floorMaterial;
     this.floor.receiveShadows = true;
-
-    // Add physics
-    new PhysicsAggregate(
-      this.floor,
-      PhysicsShapeType.BOX,
-      {
-        mass: 0,
-        friction: 0.8,
-        restitution: 0.3,
-      },
-      this.scene
-    );
   }
 
   private createFieldMarkings(): void {
@@ -306,6 +292,7 @@ export class Arena {
     const straightLengthZ = LENGTH - 2 * CORNER_RADIUS;
 
     // Side walls (along Z axis, with gaps for corners)
+    // Physics handled by PhysicsSystem with Cannon-ES
     [-1, 1].forEach((side) => {
       const wall = MeshBuilder.CreateBox(
         `sideWall_${side}`,
@@ -324,13 +311,6 @@ export class Arena {
       wall.material = this.wallMaterial;
       wall.receiveShadows = true;
       this.walls.push(wall);
-
-      new PhysicsAggregate(
-        wall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.6 },
-        this.scene
-      );
     });
 
     // Back walls (along X axis, with goal openings and gaps for corners)
@@ -356,13 +336,6 @@ export class Arena {
       leftWall.receiveShadows = true;
       this.walls.push(leftWall);
 
-      new PhysicsAggregate(
-        leftWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.6 },
-        this.scene
-      );
-
       // Right section
       const rightWall = MeshBuilder.CreateBox(
         `backWall_${side}_right`,
@@ -381,13 +354,6 @@ export class Arena {
       rightWall.material = this.wallMaterial;
       rightWall.receiveShadows = true;
       this.walls.push(rightWall);
-
-      new PhysicsAggregate(
-        rightWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.6 },
-        this.scene
-      );
     });
 
     // Curved corners
@@ -412,6 +378,7 @@ export class Arena {
 
     cornerPositions.forEach((corner, cornerIndex) => {
       // Create curved wall segments for each corner
+      // Physics handled by PhysicsSystem with Cannon-ES
       for (let i = 0; i < segments; i++) {
         const angle1 = corner.startAngle + (i * Math.PI) / (2 * segments);
         const angle2 = corner.startAngle + ((i + 1) * Math.PI) / (2 * segments);
@@ -439,13 +406,6 @@ export class Arena {
         segment.material = this.wallMaterial;
         segment.receiveShadows = true;
         this.walls.push(segment);
-
-        new PhysicsAggregate(
-          segment,
-          PhysicsShapeType.BOX,
-          { mass: 0, friction: 0.3, restitution: 0.6 },
-          this.scene
-        );
       }
     });
   }
@@ -469,7 +429,7 @@ export class Arena {
     const goalMeshes: Mesh[] = [];
     const teamMaterial = isBlue ? this.blueGoalMaterial : this.orangeGoalMaterial;
 
-    // Goal posts (vertical)
+    // Goal posts (vertical) - physics handled by PhysicsSystem
     [-1, 1].forEach((side) => {
       const post = MeshBuilder.CreateCylinder(
         `goalPost_${team}_${side}`,
@@ -486,13 +446,6 @@ export class Arena {
       );
       post.material = this.goalFrameMaterial;
       goalMeshes.push(post);
-
-      new PhysicsAggregate(
-        post,
-        PhysicsShapeType.CYLINDER,
-        { mass: 0, friction: 0.3, restitution: 0.8 },
-        this.scene
-      );
     });
 
     // Crossbar (horizontal)
@@ -513,13 +466,6 @@ export class Arena {
     crossbar.material = this.goalFrameMaterial;
     goalMeshes.push(crossbar);
 
-    new PhysicsAggregate(
-      crossbar,
-      PhysicsShapeType.CYLINDER,
-      { mass: 0, friction: 0.3, restitution: 0.8 },
-      this.scene
-    );
-
     // Goal back wall
     const backWall = MeshBuilder.CreateBox(
       `goalBack_${team}`,
@@ -537,13 +483,6 @@ export class Arena {
     );
     backWall.material = this.goalNetMaterial;
     goalMeshes.push(backWall);
-
-    new PhysicsAggregate(
-      backWall,
-      PhysicsShapeType.BOX,
-      { mass: 0, friction: 0.2, restitution: 0.3 },
-      this.scene
-    );
 
     // Goal side walls (inside the goal)
     [-1, 1].forEach((side) => {
@@ -563,13 +502,6 @@ export class Arena {
       );
       sideWall.material = this.goalNetMaterial;
       goalMeshes.push(sideWall);
-
-      new PhysicsAggregate(
-        sideWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.2, restitution: 0.3 },
-        this.scene
-      );
     });
 
     // Goal roof
@@ -589,13 +521,6 @@ export class Arena {
     );
     roof.material = this.goalNetMaterial;
     goalMeshes.push(roof);
-
-    new PhysicsAggregate(
-      roof,
-      PhysicsShapeType.BOX,
-      { mass: 0, friction: 0.2, restitution: 0.3 },
-      this.scene
-    );
 
     // Goal floor (colored by team)
     const goalFloor = MeshBuilder.CreateBox(
