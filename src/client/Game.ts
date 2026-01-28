@@ -155,6 +155,12 @@ export class Game {
         this.onMatchEnd();
       }
       this.updateTimerDisplay();
+
+      // Check for goals
+      const goalScored = this.physicsSystem.checkGoal();
+      if (goalScored) {
+        this.scoreGoal(goalScored);
+      }
     }
   }
 
@@ -191,8 +197,10 @@ export class Game {
   }
 
   private resetPositions(): void {
-    // Reset ball and car positions (to be implemented)
+    // Reset ball position
     this.physicsSystem.resetBall();
+    // Reset all boost pads
+    this.physicsSystem.resetBoostPads();
   }
 
   private onMatchEnd(): void {

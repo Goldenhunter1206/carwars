@@ -11,10 +11,16 @@ import {
 import { HavokPlugin } from '@babylonjs/core/Physics/v2/Plugins/havokPlugin';
 import HavokPhysics from '@babylonjs/havok';
 import { GAME_CONFIG, BALL_CONFIG } from '../../shared/constants';
+import { Arena } from '../entities/Arena';
+import { BoostPadManager } from '../entities/BoostPad';
 
 export class PhysicsSystem {
   private scene: Scene;
   private havokPlugin: HavokPlugin | null = null;
+
+  // Arena and boost pads
+  private arena: Arena | null = null;
+  private boostPadManager: BoostPadManager | null = null;
 
   // Physics bodies
   private ballMesh: Mesh | null = null;
@@ -39,227 +45,21 @@ export class PhysicsSystem {
   }
 
   createArenaFloor(): void {
-    // Create the ground mesh
-    const ground = MeshBuilder.CreateGround(
-      'ground',
-      {
-        width: GAME_CONFIG.ARENA.WIDTH,
-        height: GAME_CONFIG.ARENA.LENGTH,
-        subdivisions: 2,
-      },
-      this.scene
-    );
+    // Create the arena with curved corners, goals, and field markings
+    this.arena = new Arena(this.scene);
+    this.arena.create();
 
-    // Create material for the ground
-    const groundMaterial = new StandardMaterial('groundMaterial', this.scene);
-    groundMaterial.diffuseColor = new Color3(0.15, 0.4, 0.15); // Soccer field green
-    groundMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
-    ground.material = groundMaterial;
-    ground.receiveShadows = true;
-
-    // Add physics to ground
-    new PhysicsAggregate(
-      ground,
-      PhysicsShapeType.BOX,
-      {
-        mass: 0, // Static object
-        friction: 0.8,
-        restitution: 0.3,
-      },
-      this.scene
-    );
-
-    // Create field lines
-    this.createFieldLines();
-
-    // Create arena walls
-    this.createArenaWalls();
+    // Create boost pad system
+    this.boostPadManager = new BoostPadManager(this.scene);
+    this.boostPadManager.initialize();
 
     // Create the ball
     this.createBall();
 
     // Create test car placeholder (for camera target)
     this.createTestCar();
-  }
 
-  private createFieldLines(): void {
-    // Center circle
-    const centerCircle = MeshBuilder.CreateTorus(
-      'centerCircle',
-      {
-        diameter: 20,
-        thickness: 0.15,
-        tessellation: 64,
-      },
-      this.scene
-    );
-    centerCircle.position.y = 0.01;
-    centerCircle.rotation.x = Math.PI / 2;
-
-    const lineMaterial = new StandardMaterial('lineMaterial', this.scene);
-    lineMaterial.diffuseColor = Color3.White();
-    lineMaterial.emissiveColor = new Color3(0.8, 0.8, 0.8);
-    centerCircle.material = lineMaterial;
-
-    // Center line
-    const centerLine = MeshBuilder.CreateBox(
-      'centerLine',
-      {
-        width: GAME_CONFIG.ARENA.WIDTH,
-        height: 0.02,
-        depth: 0.2,
-      },
-      this.scene
-    );
-    centerLine.position.y = 0.01;
-    centerLine.material = lineMaterial;
-
-    // Goal boxes (simplified)
-    const goalBoxWidth = 20;
-    const goalBoxDepth = 10;
-
-    // Blue goal box
-    this.createGoalBox(-GAME_CONFIG.ARENA.LENGTH / 2 + goalBoxDepth / 2, goalBoxWidth, goalBoxDepth, lineMaterial);
-
-    // Orange goal box
-    this.createGoalBox(GAME_CONFIG.ARENA.LENGTH / 2 - goalBoxDepth / 2, goalBoxWidth, goalBoxDepth, lineMaterial);
-  }
-
-  private createGoalBox(z: number, width: number, depth: number, material: StandardMaterial): void {
-    // Front line
-    const frontLine = MeshBuilder.CreateBox(
-      `goalBoxFront_${z}`,
-      { width, height: 0.02, depth: 0.2 },
-      this.scene
-    );
-    frontLine.position = new Vector3(0, 0.01, z + (z < 0 ? depth / 2 : -depth / 2));
-    frontLine.material = material;
-
-    // Side lines
-    [-1, 1].forEach((side) => {
-      const sideLine = MeshBuilder.CreateBox(
-        `goalBoxSide_${z}_${side}`,
-        { width: 0.2, height: 0.02, depth },
-        this.scene
-      );
-      sideLine.position = new Vector3((side * width) / 2, 0.01, z);
-      sideLine.material = material;
-    });
-  }
-
-  private createArenaWalls(): void {
-    const wallHeight = GAME_CONFIG.ARENA.WALL_HEIGHT;
-    const wallThickness = 1;
-
-    const wallMaterial = new StandardMaterial('wallMaterial', this.scene);
-    wallMaterial.diffuseColor = new Color3(0.3, 0.3, 0.35);
-    wallMaterial.specularColor = new Color3(0.5, 0.5, 0.5);
-
-    // Side walls (along the length)
-    [-1, 1].forEach((side) => {
-      const wall = MeshBuilder.CreateBox(
-        `sideWall_${side}`,
-        {
-          width: wallThickness,
-          height: wallHeight,
-          depth: GAME_CONFIG.ARENA.LENGTH,
-        },
-        this.scene
-      );
-      wall.position = new Vector3(
-        (side * (GAME_CONFIG.ARENA.WIDTH + wallThickness)) / 2,
-        wallHeight / 2,
-        0
-      );
-      wall.material = wallMaterial;
-      wall.receiveShadows = true;
-
-      // Add physics
-      new PhysicsAggregate(
-        wall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
-      );
-    });
-
-    // Back walls (with goal openings)
-    [-1, 1].forEach((side) => {
-      const goalWidth = GAME_CONFIG.ARENA.GOAL_WIDTH;
-      const sideWidth = (GAME_CONFIG.ARENA.WIDTH - goalWidth) / 2;
-
-      // Left section
-      const leftWall = MeshBuilder.CreateBox(
-        `backWall_${side}_left`,
-        {
-          width: sideWidth,
-          height: wallHeight,
-          depth: wallThickness,
-        },
-        this.scene
-      );
-      leftWall.position = new Vector3(
-        -(goalWidth / 2 + sideWidth / 2),
-        wallHeight / 2,
-        (side * (GAME_CONFIG.ARENA.LENGTH + wallThickness)) / 2
-      );
-      leftWall.material = wallMaterial;
-
-      new PhysicsAggregate(
-        leftWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
-      );
-
-      // Right section
-      const rightWall = MeshBuilder.CreateBox(
-        `backWall_${side}_right`,
-        {
-          width: sideWidth,
-          height: wallHeight,
-          depth: wallThickness,
-        },
-        this.scene
-      );
-      rightWall.position = new Vector3(
-        goalWidth / 2 + sideWidth / 2,
-        wallHeight / 2,
-        (side * (GAME_CONFIG.ARENA.LENGTH + wallThickness)) / 2
-      );
-      rightWall.material = wallMaterial;
-
-      new PhysicsAggregate(
-        rightWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
-      );
-
-      // Goal crossbar
-      const crossbar = MeshBuilder.CreateBox(
-        `crossbar_${side}`,
-        {
-          width: goalWidth,
-          height: wallThickness / 2,
-          depth: wallThickness,
-        },
-        this.scene
-      );
-      crossbar.position = new Vector3(
-        0,
-        GAME_CONFIG.ARENA.GOAL_HEIGHT,
-        (side * (GAME_CONFIG.ARENA.LENGTH + wallThickness)) / 2
-      );
-      crossbar.material = wallMaterial;
-
-      new PhysicsAggregate(
-        crossbar,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
-      );
-    });
+    console.log('Arena created with curved corners, goals, and boost pads');
   }
 
   private createBall(): void {
@@ -334,9 +134,14 @@ export class PhysicsSystem {
     this.scene.metadata.playerCar = car;
   }
 
-  update(_deltaTime: number): void {
+  update(deltaTime: number): void {
     // Physics is automatically stepped by Babylon's physics plugin
     // Additional game physics logic can go here
+
+    // Update boost pads (respawn timers)
+    if (this.boostPadManager) {
+      this.boostPadManager.update(deltaTime);
+    }
 
     // Clamp ball speed
     if (this.ballAggregate) {
@@ -367,5 +172,47 @@ export class PhysicsSystem {
 
   getBallPosition(): Vector3 {
     return this.ballMesh?.position.clone() || Vector3.Zero();
+  }
+
+  getArena(): Arena | null {
+    return this.arena;
+  }
+
+  getBoostPadManager(): BoostPadManager | null {
+    return this.boostPadManager;
+  }
+
+  // Check if a car at the given position can collect boost
+  collectBoost(carPosition: Vector3, carRadius: number = 1.5): number {
+    if (!this.boostPadManager) return 0;
+    return this.boostPadManager.checkCollection(carPosition, carRadius);
+  }
+
+  // Reset all boost pads (called after goal or match start)
+  resetBoostPads(): void {
+    this.boostPadManager?.resetAll();
+  }
+
+  // Check if ball is in goal zone
+  checkGoal(): 'blue' | 'orange' | null {
+    if (!this.ballMesh) return null;
+
+    const ballPos = this.ballMesh.position;
+    const { LENGTH, GOAL_WIDTH, GOAL_HEIGHT, GOAL_DEPTH } = GAME_CONFIG.ARENA;
+    const halfLength = LENGTH / 2;
+
+    // Check if ball is within goal boundaries
+    if (Math.abs(ballPos.x) < GOAL_WIDTH / 2 && ballPos.y < GOAL_HEIGHT) {
+      // Blue goal (negative Z)
+      if (ballPos.z < -halfLength && ballPos.z > -halfLength - GOAL_DEPTH) {
+        return 'orange'; // Orange team scored
+      }
+      // Orange goal (positive Z)
+      if (ballPos.z > halfLength && ballPos.z < halfLength + GOAL_DEPTH) {
+        return 'blue'; // Blue team scored
+      }
+    }
+
+    return null;
   }
 }
