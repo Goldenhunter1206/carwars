@@ -5,37 +5,40 @@ import {
   StandardMaterial,
   Color3,
   Mesh,
-  PhysicsAggregate,
-  PhysicsShapeType,
+  Quaternion,
 } from '@babylonjs/core';
-import { HavokPlugin } from '@babylonjs/core/Physics/v2/Plugins/havokPlugin';
-import HavokPhysics from '@babylonjs/havok';
+import * as CANNON from 'cannon-es';
 import { GAME_CONFIG, BALL_CONFIG } from '../../shared/constants';
 
 export class PhysicsSystem {
   private scene: Scene;
-  private havokPlugin: HavokPlugin | null = null;
+  private world: CANNON.World | null = null;
 
   // Physics bodies
   private ballMesh: Mesh | null = null;
-  private ballAggregate: PhysicsAggregate | null = null;
+  private ballBody: CANNON.Body | null = null;
+  private groundBody: CANNON.Body | null = null;
+
+  // Track all physics bodies for updates
+  private physicsBodies: Array<{ mesh: Mesh; body: CANNON.Body }> = [];
 
   constructor(scene: Scene) {
     this.scene = scene;
   }
 
   async initialize(): Promise<void> {
-    // Initialize Havok physics
-    const havokInstance = await HavokPhysics();
-    this.havokPlugin = new HavokPlugin(true, havokInstance);
+    // Initialize Cannon.js physics world
+    this.world = new CANNON.World();
+    this.world.gravity.set(0, GAME_CONFIG.GRAVITY, 0);
 
-    // Enable physics in the scene
-    this.scene.enablePhysics(
-      new Vector3(0, GAME_CONFIG.GRAVITY, 0),
-      this.havokPlugin
-    );
+    // Improve solver for better stability
+    this.world.broadphase = new CANNON.SAPBroadphase(this.world);
 
-    console.log('Havok physics initialized');
+    // Default contact material
+    this.world.defaultContactMaterial.friction = 0.3;
+    this.world.defaultContactMaterial.restitution = 0.5;
+
+    console.log('Cannon-ES physics initialized');
   }
 
   createArenaFloor(): void {
@@ -57,17 +60,12 @@ export class PhysicsSystem {
     ground.material = groundMaterial;
     ground.receiveShadows = true;
 
-    // Add physics to ground
-    new PhysicsAggregate(
-      ground,
-      PhysicsShapeType.BOX,
-      {
-        mass: 0, // Static object
-        friction: 0.8,
-        restitution: 0.3,
-      },
-      this.scene
-    );
+    // Add physics ground plane
+    const groundShape = new CANNON.Plane();
+    this.groundBody = new CANNON.Body({ mass: 0 });
+    this.groundBody.addShape(groundShape);
+    this.groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+    this.world!.addBody(this.groundBody);
 
     // Create field lines
     this.createFieldLines();
@@ -175,11 +173,11 @@ export class PhysicsSystem {
       wall.receiveShadows = true;
 
       // Add physics
-      new PhysicsAggregate(
-        wall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
+      this.addStaticBox(
+        wallThickness / 2,
+        wallHeight / 2,
+        GAME_CONFIG.ARENA.LENGTH / 2,
+        wall.position
       );
     });
 
@@ -205,11 +203,11 @@ export class PhysicsSystem {
       );
       leftWall.material = wallMaterial;
 
-      new PhysicsAggregate(
-        leftWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
+      this.addStaticBox(
+        sideWidth / 2,
+        wallHeight / 2,
+        wallThickness / 2,
+        leftWall.position
       );
 
       // Right section
@@ -229,11 +227,11 @@ export class PhysicsSystem {
       );
       rightWall.material = wallMaterial;
 
-      new PhysicsAggregate(
-        rightWall,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
+      this.addStaticBox(
+        sideWidth / 2,
+        wallHeight / 2,
+        wallThickness / 2,
+        rightWall.position
       );
 
       // Goal crossbar
@@ -253,13 +251,22 @@ export class PhysicsSystem {
       );
       crossbar.material = wallMaterial;
 
-      new PhysicsAggregate(
-        crossbar,
-        PhysicsShapeType.BOX,
-        { mass: 0, friction: 0.3, restitution: 0.5 },
-        this.scene
+      this.addStaticBox(
+        goalWidth / 2,
+        wallThickness / 4,
+        wallThickness / 2,
+        crossbar.position
       );
     });
+  }
+
+  private addStaticBox(halfX: number, halfY: number, halfZ: number, position: Vector3): CANNON.Body {
+    const shape = new CANNON.Box(new CANNON.Vec3(halfX, halfY, halfZ));
+    const body = new CANNON.Body({ mass: 0 });
+    body.addShape(shape);
+    body.position.set(position.x, position.y, position.z);
+    this.world!.addBody(body);
+    return body;
   }
 
   private createBall(): void {
@@ -272,7 +279,7 @@ export class PhysicsSystem {
       },
       this.scene
     );
-    this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 0.5, 0);
+    this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 2, 0);
 
     // Ball material (soccer ball look)
     const ballMaterial = new StandardMaterial('ballMaterial', this.scene);
@@ -282,21 +289,29 @@ export class PhysicsSystem {
     this.ballMesh.material = ballMaterial;
 
     // Add physics to ball
-    this.ballAggregate = new PhysicsAggregate(
-      this.ballMesh,
-      PhysicsShapeType.SPHERE,
+    const ballShape = new CANNON.Sphere(BALL_CONFIG.RADIUS);
+    this.ballBody = new CANNON.Body({
+      mass: BALL_CONFIG.MASS,
+      shape: ballShape,
+      position: new CANNON.Vec3(0, BALL_CONFIG.RADIUS + 2, 0),
+      linearDamping: BALL_CONFIG.LINEAR_DAMPING,
+      angularDamping: BALL_CONFIG.ANGULAR_DAMPING,
+    });
+
+    // Set material properties
+    this.ballBody.material = new CANNON.Material('ball');
+    const ballGroundContact = new CANNON.ContactMaterial(
+      this.ballBody.material,
+      new CANNON.Material('ground'),
       {
-        mass: BALL_CONFIG.MASS,
         friction: BALL_CONFIG.FRICTION,
         restitution: BALL_CONFIG.RESTITUTION,
-      },
-      this.scene
+      }
     );
+    this.world!.addContactMaterial(ballGroundContact);
+    this.world!.addBody(this.ballBody);
 
-    // Apply some damping
-    const body = this.ballAggregate.body;
-    body.setLinearDamping(BALL_CONFIG.LINEAR_DAMPING);
-    body.setAngularDamping(BALL_CONFIG.ANGULAR_DAMPING);
+    this.physicsBodies.push({ mesh: this.ballMesh, body: this.ballBody });
   }
 
   private createTestCar(): void {
@@ -310,7 +325,7 @@ export class PhysicsSystem {
       },
       this.scene
     );
-    car.position = new Vector3(0, 0.5, 20);
+    car.position = new Vector3(0, 1, 20);
 
     const carMaterial = new StandardMaterial('carMaterial', this.scene);
     carMaterial.diffuseColor = new Color3(0.2, 0.5, 1); // Blue team car
@@ -318,46 +333,59 @@ export class PhysicsSystem {
     car.material = carMaterial;
 
     // Add physics to car
-    new PhysicsAggregate(
-      car,
-      PhysicsShapeType.BOX,
-      {
-        mass: 150,
-        friction: 0.5,
-        restitution: 0.2,
-      },
-      this.scene
-    );
+    const carShape = new CANNON.Box(new CANNON.Vec3(0.65, 0.25, 1.15));
+    const carBody = new CANNON.Body({
+      mass: 150,
+      shape: carShape,
+      position: new CANNON.Vec3(0, 1, 20),
+      linearDamping: 0.3,
+      angularDamping: 0.5,
+    });
+    this.world!.addBody(carBody);
+    this.physicsBodies.push({ mesh: car, body: carBody });
 
     // Store reference for camera
     this.scene.metadata = this.scene.metadata || {};
     this.scene.metadata.playerCar = car;
   }
 
-  update(_deltaTime: number): void {
-    // Physics is automatically stepped by Babylon's physics plugin
-    // Additional game physics logic can go here
+  update(deltaTime: number): void {
+    if (!this.world) return;
+
+    // Step the physics simulation
+    this.world.step(1 / 60, deltaTime, 3);
+
+    // Sync mesh positions with physics bodies
+    for (const { mesh, body } of this.physicsBodies) {
+      mesh.position.set(body.position.x, body.position.y, body.position.z);
+      mesh.rotationQuaternion = new Quaternion(
+        body.quaternion.x,
+        body.quaternion.y,
+        body.quaternion.z,
+        body.quaternion.w
+      );
+    }
 
     // Clamp ball speed
-    if (this.ballAggregate) {
-      const velocity = this.ballAggregate.body.getLinearVelocity();
+    if (this.ballBody) {
+      const velocity = this.ballBody.velocity;
       const speed = velocity.length();
 
       if (speed > BALL_CONFIG.MAX_SPEED) {
-        const clampedVelocity = velocity.normalize().scale(BALL_CONFIG.MAX_SPEED);
-        this.ballAggregate.body.setLinearVelocity(clampedVelocity);
+        velocity.scale(BALL_CONFIG.MAX_SPEED / speed, velocity);
       }
     }
   }
 
   resetBall(): void {
-    if (this.ballMesh && this.ballAggregate) {
+    if (this.ballMesh && this.ballBody) {
       // Reset position
-      this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 0.5, 0);
+      this.ballBody.position.set(0, BALL_CONFIG.RADIUS + 2, 0);
+      this.ballMesh.position = new Vector3(0, BALL_CONFIG.RADIUS + 2, 0);
 
       // Reset velocities
-      this.ballAggregate.body.setLinearVelocity(Vector3.Zero());
-      this.ballAggregate.body.setAngularVelocity(Vector3.Zero());
+      this.ballBody.velocity.set(0, 0, 0);
+      this.ballBody.angularVelocity.set(0, 0, 0);
     }
   }
 
